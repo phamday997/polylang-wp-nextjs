@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: WC REST – Polylang Lang Field + Strong REST Filters (+ Translations map)
- * Description: Adds "lang" to Woo REST responses (products, product_cat, product_tag), enforces ?lang=xx / X-WP-Polylang-Lang (and optional ?locale=xx_XX) for products & categories, and exposes a "translations" map so the frontend can jump to the correct slug when switching locale.
+ * Description: Adds "lang" to Woo REST responses (products, product_cat, product_tag, items in orders), enforces ?lang=xx / X-WP-Polylang-Lang (and optional ?locale=xx_XX) for products & categories, and exposes a "translations" map so the frontend can jump to the correct slug when switching locale.
  * Author: Pham Van Day (The Officience)
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: You
  * License: GPLv2 or later
  */
@@ -54,6 +54,9 @@ class WC_REST_PolyLang_Enforcer {
 		 * -------------------------------------------------------------
 		 */
 		add_action('rest_api_init', [$this, 'register_custom_routes']); // [ADDED]
+		
+		// [ADDED] Enrich order line_items with Polylang translations of the product
+		add_filter('woocommerce_rest_prepare_shop_order_object', [$this, 'add_line_item_translations'], 10, 3);
 	}
 
 	/* ---------- Add "lang" field to responses (basic) ---------- */
@@ -329,6 +332,67 @@ class WC_REST_PolyLang_Enforcer {
 			'lang' => $to,
 		];
 	}
+
+	public function add_line_item_translations($response, $object, $request) {
+		if (!is_a($response, 'WP_REST_Response')) return $response;
+		
+		if (!function_exists('pll_get_post_translations')) return $response;
+
+		$data = $response->get_data();
+		if (empty($data['line_items']) || !is_array($data['line_items'])) {
+			return $response;
+		}
+
+		$langs = [];
+		if (function_exists('pll_languages_list')) {
+			$list = pll_languages_list(['fields' => []]);
+			foreach ((array) $list as $l) {
+				if (!empty($l->slug)) $langs[] = $l->slug;
+			}
+		}
+
+		foreach ($data['line_items'] as $idx => $li) {
+			$product_id = 0;
+			if (!empty($li['variation_id'])) {
+				$product_id = (int) $li['variation_id'];
+			}
+			if (!$product_id && !empty($li['product_id'])) {
+				$product_id = (int) $li['product_id'];
+			}
+			if (!$product_id) {
+				$data['line_items'][$idx]['translations'] = new stdClass(); // {} rỗng
+				continue;
+			}
+
+			
+			$map = pll_get_post_translations($product_id);
+			if (!is_array($map) || empty($map)) {
+				$data['line_items'][$idx]['translations'] = new stdClass(); // {}
+				continue;
+			}
+
+			$out = [];
+			
+			$iter = !empty($langs) ? $langs : array_keys($map);
+
+			foreach ($iter as $lang) {
+				if (empty($map[$lang])) continue;
+				$pid = (int) $map[$lang];
+
+				$out[$lang] = [
+					'id'    => $pid,
+					'slug'  => (string) get_post_field('post_name', $pid),
+					'title' => (string) get_the_title($pid),
+				];
+			}
+
+			$data['line_items'][$idx]['translations'] = !empty($out) ? $out : new stdClass();
+		}
+
+		$response->set_data($data);
+		return $response;
+	}
+
 }
 
 add_action('plugins_loaded', function () {
